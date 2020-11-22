@@ -5,12 +5,14 @@
 
 #include <stdint.h> // для фиксированных типов
 
-#define IMMEDIATE_MASK_16 0x8000 // маска для знаковых типов 16bit
-#define IMMEDIATE_MASK_32 0x80000000 // маска для знаковых типов 32bit
+#define IMMEDIATE_MASK_16 0x8000 // маска для знаковых типов 16 бит
+#define IMMEDIATE_MASK_32 0x80000000 // маска для знаковых типов 32 бит
 
-typedef int8_t char_t;
+typedef int8_t  char_t;
 typedef int16_t short_t;
 typedef int32_t int_t;
+
+typedef uint8_t  heap_t;
 typedef uint32_t stack_t;
 
 typedef union {
