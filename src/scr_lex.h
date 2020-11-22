@@ -38,7 +38,6 @@ class Token
 			Return,
 			And,
 			Or,
-//###
 			LeftParen,
 			RightParen,
 			LeftSquare,
