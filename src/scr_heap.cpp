@@ -1,19 +1,13 @@
+/*
+** 
+*/
 
 #include "scr_heap.h"
 #include "HardwareSerial.h"
 
-uint8_t heap[DEFAULT_HEAP_SIZE];
-uint16_t heap_base = 0;
-
-// Заголовок блока
-
-typedef struct {
-	heap_id_t id; // 8 / 16 бит
-	uint16_t len; // 16 бит
-} heap_t;
-
-void heap_memcpy_up(uint8_t *dst, uint8_t *src, uint16_t len) {
-	dst += len;  src += len;
+static inline void heap_memcpy_up(uint8_t *dst, uint8_t *src, uint16_t len) {
+	dst += len;
+	src += len;
 	while(len--) *--dst = *--src;
 }
 
@@ -24,61 +18,81 @@ static inline void h_memcpy(void *dst, void *src, uint16_t len) {
 		*dst8++ = *src8++;
 }
 
+// Инициализация
+
+Heap::Heap(int _length) {
+	heaphdr_t *h;
+	heap = new heap_t[_length];
+	base = 0;
+	length = _length;
+	// Один пустой блок занимает всё пространство
+	h = (heaphdr_t*)&heap[0];
+	h->id = HEAP_ID_FREE;
+	h->len = _length - sizeof(heaphdr_t);
+}
+
+uint16_t Heap::get_base(){return base;}
+heap_t* Heap::get_heap(){return heap;}
+uint16_t Heap::get_length(){return length;}
+
 // Поиск блока с идентификатором
 
-heap_t* heap_search(heap_id_t id) {
-	uint16_t current = heap_base;
-	while(current < sizeof(heap)) {
-		heap_t *h = (heap_t*)&heap[current];
+static inline heaphdr_t* heap_search(heap_t *heap, uint16_t base, uint16_t length, heap_id_t id) {
+	uint16_t current = base;
+	while (current < length) {
+		heaphdr_t *h = (heaphdr_t*)&heap[current];
 		if(h->id == id) return h;
-		current += h->len + sizeof(heap_t);
+		current += h->len + sizeof(heaphdr_t);
 	}
 	return 0;
 }
 
 // Поиск свободного блока
 
-heap_id_t heap_new_id() {
+static inline heap_id_t heap_new_id(heap_t *heap, uint16_t base, uint16_t length) {
 	heap_id_t id;
 	for (id = 1; id; id++) 
-		if (!heap_search(id))
+		if (!heap_search(heap, base, length, id))
 			return id;
 	return 0;
 }
 
 // Выделение памяти по идентификатору
 
-bool heap_alloc_internal(heap_id_t id, uint16_t size) {
-	uint16_t required = size + sizeof(heap_t);
-	heap_t *h = (heap_t*)&heap[heap_base];
-	if(h->len >= required) { // если есть свободное пространство
+static inline bool heap_alloc_internal(heap_t *heap, uint16_t base, uint16_t length, 
+heap_id_t id, uint16_t size) {
+	uint16_t required = size + sizeof(heaphdr_t);
+	heaphdr_t *h = (heaphdr_t*)&heap[base];
+	if (h->len >= required) { // если есть свободное пространство
 		h->len -= required; // уменьшение свободного блока
-		h = (heap_t*)&heap[heap_base + sizeof(heap_t) + h->len];
+		h = (heaphdr_t*)&heap[base + sizeof(heaphdr_t) + h->len];
 		h->id = id;
 		h->len = size;
 		// заполнение нулями
 		uint8_t *ptr = (uint8_t*)(h + 1);
-		while(size--)
+		while (size--)
 			*ptr++ = 0;
 		return true;
+	} else {
+		// ошибка: нет свободного пространства
 	}
 	return false;
 }
 
-void heap_dbg() {
-	for(int i = 0; i < DEFAULT_HEAP_SIZE; i++){
-		Serial.println(heap[DEFAULT_HEAP_SIZE-i]);
+void Heap::heap_dmp() {
+	for (int i = 0; i < length; i++) {
+		Serial.println(heap[length-i]);
 	}
 }
 
 // Создание блока
 
-heap_id_t heap_alloc(uint16_t size) {
-	heap_id_t id = heap_new_id();
-	if(!id){
+heap_id_t Heap::alloc(uint16_t size) {
+	heap_id_t id = heap_new_id(heap, base, length);
+	if (!id) {
 		/*Ошибка!*/
 	}
-	if(!heap_alloc_internal(id, size)){
+	if (!heap_alloc_internal(heap, base, length, id, size)) {
 		/*Ошибка!*/
 	}
 	return id;
@@ -86,12 +100,12 @@ heap_id_t heap_alloc(uint16_t size) {
 
 // Удаление блока
 
-void heap_free(heap_id_t id) {
-	heap_t *h = heap_search(id);
-	if(h){
-		uint16_t len = h->len + sizeof(heap_t);
-		heap_memcpy_up(heap + heap_base + len, heap + heap_base, ((uint8_t*)h - (uint8_t*)&heap[0]) - heap_base);
-		h = (heap_t*)&heap[heap_base]; // увеличение свободного блока
+void Heap::free(heap_id_t id) {
+	heaphdr_t *h = heap_search(heap, base, length, id);
+	if (h) {
+		uint16_t len = h->len + sizeof(heaphdr_t);
+		heap_memcpy_up(heap + base + len, heap + base, ((uint8_t*)h - (uint8_t*)&heap[0]) - base);
+		h = (heaphdr_t*)&heap[base]; // увеличение свободного блока
 		h->len += len;
 	} else {
 		Serial.print("Not found id:");
@@ -101,101 +115,79 @@ void heap_free(heap_id_t id) {
 
 // Увеличение размера блока
 
-void heap_realloc(heap_id_t id, uint16_t size) {
-	heap_t *h_old, *h_new;
+void Heap::realloc(heap_id_t id, uint16_t size) {
+	heaphdr_t *h_old, *h_new;
 	// заголовок старого блока
-	h_old = heap_search(id);
+	h_old = heap_search(heap, base, length, id);
 	// создание нового блока
-	if(!heap_alloc_internal(id, h_old->len))
+	if (!heap_alloc_internal(heap, base, length, id, h_old->len))
 	{/*Ошибка!*/}
-	h_new = heap_search(id);
+	h_new = heap_search(heap, base, length, id);
 	h_memcpy(h_new + 1, h_old + 1, h_old->len);
 	// удаляет старый блок
-	heap_free(h_old->id);
+	free(h_old->id);
 }
 
 // Возвращает длину блока
 
-uint16_t heap_get_length(heap_id_t id) {
-  heap_t *h = heap_search(id);
-  if(h==nullptr){/*Ошибка!*/}
+uint16_t Heap::get_length(heap_id_t id) {
+  heaphdr_t *h = heap_search(heap, base, length, id);
+  if (h==nullptr){/*Ошибка!*/}
   return h->len;
 }
 
 // Возвращает адрес данных в блоке
 
-void* heap_get_addr(heap_id_t id) {
-	heap_t *h = heap_search(id);
-	if(h==nullptr){/*Ошибка!*/}
+void* Heap::get_addr(heap_id_t id) {
+	heaphdr_t *h = heap_search(heap, base, length, id);
+	if (h==nullptr){/*Ошибка!*/}
 	return h + 1;
-}
-
-// Инициализация
-
-void heap_init() {
-	heap_t *h;
-	// Один пустой блок занимает всё пространство
-	h = (heap_t*)&heap[0];
-	h->id = HEAP_ID_FREE;
-	h->len = sizeof(heap) - sizeof(heap_t);
 }
 
 // Возвращает размер свободного блока
 
-uint16_t heap_get_free_size() {
-	return ((heap_t*)&heap[heap_base])->len;
-}
-
-// Возвращает указатель на начало кучи
-
-uint8_t* heap_get_base() {
-	return heap;
+uint16_t Heap::get_free_size() {
+	return ((heaphdr_t*)&heap[base])->len;
 }
 
 // Возвращает указатель на начало свободного блока
 
-uint8_t* heap_get_relative_base() {
-	return heap + heap_base;
+heap_t* Heap::get_relative_base() {
+	return heap + base;
 }
 
 // Занимает [length] байт из кучи (для стека)
 
-void heap_steal(uint16_t length) {
-	heap_t *h = (heap_t*)&heap[heap_base];
+void Heap::mem_steal(uint16_t length) {
+	heaphdr_t *h = (heaphdr_t*)&heap[base];
 	uint16_t len;
-	
-	if(h->id != HEAP_ID_FREE) {
-		/*Ошибка!*/
+	if (h->id != HEAP_ID_FREE) {
+		/*Ошибка! Куча повреждена*/
 	}
-	
 	len = h->len;
-	if(len < length) {
-		/*Ошибка!*/
+	if (len < length) {
+		/*Ошибка! Переполнение*/
 	}
-
-	heap_base += length;
-	h = (heap_t*)&heap[heap_base];
+	base += length;
+	h = (heaphdr_t*)&heap[base];
 	h->id = HEAP_ID_FREE;
 	h->len = len - length;
 }
 
 // Возвращает [length] байт в кучу
 
-void heap_unsteal(uint16_t length) {
-	heap_t *h = (heap_t*)&heap[heap_base];
+void Heap::mem_unsteal(uint16_t length) {
+	heaphdr_t *h = (heaphdr_t*)&heap[base];
 	uint16_t len;
-
-	if(h->id != HEAP_ID_FREE) {
-		/*Ошибка!*/
+	if (h->id != HEAP_ID_FREE) {
+		/*Ошибка! Куча повреждена*/
 	}
-
-	if(heap_base < length) {
-		/*Ошибка!*/
+	if (base < length) {
+		/*Ошибка! Стек за пределами кучи*/
 	}
-
 	len = h->len;
-	heap_base -= length;
-	h = (heap_t*)&heap[heap_base];
+	base -= length;
+	h = (heaphdr_t*)&heap[base];
 	h->id = HEAP_ID_FREE;
 	h->len = len + length;
 }
