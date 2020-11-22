@@ -6,10 +6,10 @@
 #ifndef SCR_DEF_H
 #define SCR_DEF_H
 
-#include <vector>
+#include <string>
 #include "scr_parser.h"
-#include "scr_vm.h"
 #include "scr_types.h"
+#include "scr_vm.h"
 
 class LangState {
 	public:
