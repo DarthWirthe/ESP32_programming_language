@@ -5,11 +5,16 @@
 #ifndef SCR_LEX_H
 #define SCR_LEX_H
 
-#include "scr_types.h"
 //#include "utils/scr_dbg.h"
+#include <string>
+#include <stdint.h>
 #include "scr_tref.h"
+#include "scr_file.h"
 
-#define RESERVED_NUM 8
+#define LEX_INPUT_STRING 0
+#define LEX_INPUT_FILE 1
+
+#define RESERVED_NUM 10
 
 #define C_BUFFER_LEN 80
 
@@ -31,6 +36,8 @@ class Token
 			For,
 			Function,
 			Return,
+			And,
+			Or,
 //###
 			LeftParen,
 			RightParen,
@@ -50,8 +57,6 @@ class Token
 			Asterisk,
 			Slash,
 			Modulo,
-			And,
-			Or,
 			Not,
 			Dot,
 			Comma,
@@ -82,18 +87,22 @@ class Lexer
 {
 	public:
 		Lexer(void);
-		Lexer(char *inp);
+		Lexer(int input_type, std::string s);
 
 		char Peek(void); // возвращает последний символ
 		char Get(void); // переход к следующему символу
 		char PeekNext(void); // возвращает следующий символ
-		Token SetToken(Token::Type typ, int val);
 		Token Next(void);
 		void Pointer(char *p);
 		//###
 		Token last_token;
 		int line = 1;
 		int column = 1;
+	private:
+		int InputType;
+		char *pointer;
+		char *input_base;
+		File file;
 };
 
 #endif
