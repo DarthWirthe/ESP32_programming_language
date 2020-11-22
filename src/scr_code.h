@@ -7,6 +7,8 @@
 #ifndef SCR_CODE_H
 #define SCR_CODE_H
 
+#include <stdio.h>
+#include <vector>
 #include "scr_opcodes.h"
 #include "scr_tref.h"
 #include "scr_types.h"
@@ -51,23 +53,21 @@ typedef union {
 	float f;
 	char *c;
 	OpType op;
-} node_value;
+} NodeValueUnion;
 
-struct node {
-	uint8_t type;
-	node_value value;
-};
-
-struct ExprBuffer {
-	node buffer[128];
-	int count;
-	ExprBuffer() {
-		count = 0;
+struct Node {
+	Node(){}
+	Node(uint8_t _type, NodeValueUnion _value) {
+		type = _type;
+		value = _value;
 	}
+	uint8_t type;
+	NodeValueUnion value;
 };
+
 // ######
 
-enum class var_type {
+enum class VarType {
 	None,
 	Int,
 	Float,
@@ -76,11 +76,18 @@ enum class var_type {
 	ConstFloat
 };
 
-struct var_name {
-	~var_name(void);
+// информация об объявленной ранее функции
+struct FuncData {
+	uint8_t args;
+	uint8_t cnst;
+};
+
+struct VarState {
+	~VarState(void);
+	VarState(){}
 	char *name; // имя переменной
 	uint8_t type; // тип переменной
-	uint8_t args; // аргументы / константа
+	uint8_t data; // аргументы / константа
 	uint8_t id; // номер ид
 };
 
@@ -91,8 +98,26 @@ struct func_descr { // можно удалить
 	uint8_t *end_pt;
 };
 
+struct FuncPoint {
+	size_t c;
+	size_t pt;
+};
+
+struct FuncState {
+	char *name;
+	uint8_t locals_start;
+	uint8_t locals_count;
+	uint8_t max_stack;
+	uint8_t func_start;
+	std::vector<uint8_t> fcode;
+	FuncState *prev;
+	FuncState():
+	prev(nullptr)
+	{}
+};
+
 struct scope_info {
-	//uint8_t *code_base; // указатель на начало
+	uint8_t *code_base; // указатель на начало
 	uint8_t locals_count; // количество переменных в окружении
 	uint8_t locals_start; // количество переменных, которое было до этого
 	uint8_t id; // ид (уровень вложенности)
@@ -104,71 +129,62 @@ struct scope_info {
 	{}
 };
 
-class Uint8buffer {
-	public:
-		Uint8buffer(void);
-		~Uint8buffer(void);
-		Uint8buffer(int len);
-		void Add08(uint8_t n);
-		void Add16(uint16_t n);
-		void Set08(uint8_t* pt, uint8_t n);
-		uint8_t Get08(uint8_t* pt);
-		
-		uint8_t *data;
-		uint8_t *pointer; // указатель на последний объект
-		int length;
-};
-
 class Code {
 	public:
-		void Init(void);
+		Code(void);
+		~Code();
 		void Add(uint8_t i);
 		void Add_08(uint8_t n);
-		void NewScope(void);
+		void Add_16(uint16_t n);
+		void NewScope(char *name);
 		void CloseScope(void);
-		int Add_const_int(int n);
-		int Add_const_float(float n);
-		int AddLocal(char *name, var_type type);
+		int AddConstInt(int n);
+		int AddConstFloat(float n);
+		int AddLocal(char *name, VarType type);
 		void SetArgs(char *name, uint8_t args);
 		uint8_t GetArgs(char *name);
 		int FindLocal(char *name);
 		void CodeOperator(OpType t, bool IsFloat);
-		int FindConst(int n);
-		void CodeConstInt(int n);
-		void CodeConstFloat(float n);
-		void CodeDeclareConstVarInt(char *name, int n, var_type type);
+		int FindConstInt(int n);
+		int FindConstFloat(float n);
+		int CodeConstInt(int n);
+		int CodeConstFloat(float n);
+		int DeclareConstVarInt(char *name, int n, VarType type, bool code);
+		//void DeclareConstVarFloat(char *name, float n, VarType type, bool code);
 		void CodeJump(int shift, bool condition, bool expected);
-		void CodeExpression(ExprBuffer *expr);
-		uint8_t* CodeMainScope(void);
-		void CodeMainScopeEnd(uint8_t *pt);
-		void CodeLocalLoad(char *name);
-		void CodeLocalStore(char *name);
-		int CodeLocalDeclare(char *name, var_type type);
-		uint8_t* CodeStartFunction(char *name);
-		void CodeCloseFunction(uint8_t *func_pt);
-		void CodeCallFunction(char *name, int args);
-		void CodeReturnOperator(var_type type);
-		void CodeArrayDeclaration(char *name);
-		void CodeArrayLoad(char *name);
-		void CodeArrayStore(char *name);
-		uint8_t* CodeStartIfStatement(void);
-		void CodeCloseIfStatement(uint8_t *ifs_pt);
-		uint8_t* CodeStartWhileStatement(void);
-		void CodeCloseWhileStatement(uint8_t *ws_pt, uint8_t *exs);
+		void Expression(std::vector<Node> expr);
+		int MainScope(void);
+		void MainScopeEnd(int pos_const);
+		void LocalLoad(char *name);
+		void LocalStore(char *name);
+		int LocalDeclare(char *name, VarType type);
+		FuncPoint FunctionDeclare(char *name);
+		void FunctionClose(FuncPoint p);
+		void CallFunction(char *name, int args);
+		void ReturnOperator(VarType type);
+		size_t StartIfStatement(void);
+		size_t ElseIfStatement(void);
+		void CloseIfBranch(size_t ifs_pt);
+		void CloseIfStatement(std::vector<size_t> labels);
+		size_t StartWhileStatement(void);
+		void CloseWhileStatement(size_t ws_pt, size_t condition);
+		void ArrayDeclaration(char *name);
+		void ArrayLoad(char *name);
+		void ArrayStore(char *name);
+		size_t GetFuncCodeSize(void); 
 		num_t* GetConsts(void);
-		int GetConstsCount(void);
-		void DeleteTemp(void);
-		void DeleteBuffer(void);
 		uint8_t* GetCode(void);
+		size_t GetCodeLength(void);
+		size_t GetConstsCount(void);
 		// ###
-		Uint8buffer *rcode;
-		Uint8buffer *bytecode;
-		num_t *consts;
-		int consts_count;
-		var_name *locals;
-		uint8_t total_locals_count;
-		scope_info *current_scope = nullptr;
-		int last_scope_id;
+	private:
+		FuncState *current_scope = nullptr;
+		std::vector<FuncData> declared_functions;
+		std::vector<uint8_t> bytecode;
+		std::vector<num_t> num_consts;
+		std::vector<VarState> locals;
+		size_t main_scope_p;
+		size_t f_pt;
 };
 
 #endif
