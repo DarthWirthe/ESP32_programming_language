@@ -2,8 +2,6 @@
 #include "scr_lex.h"
 #include "HardwareSerial.h"
 
-char *pointer;
-
 char LEX_C_BUFFER[C_BUFFER_LEN];
 
 const char* token_name[] {
@@ -25,17 +23,21 @@ static const char* reserved_keywords[] = {
 	"do",
 	"for",
 	"function",
-	"return"
+	"return",
+	"and",
+	"or"
 };
 
-Token::Token(){}
+Token::Token() {
+	
+}
 
-Token::Token(Type _type){
+Token::Token(Type _type) {
 	type = _type;
 	value.c = nullptr;
 }
 
-Token::Token(Type _type, int _value){ // тип и значение
+Token::Token(Type _type, int _value) { // тип и значение
 	type = _type;
 	value.i = _value;
 }
@@ -95,8 +97,17 @@ Token ReservedToken(){
 
 Lexer::Lexer(){}
 
-Lexer::Lexer(char *inp){
-	pointer = inp;
+Lexer::Lexer(int input_type, std::string s) {
+	InputType = input_type;
+	if (input_type == LEX_INPUT_STRING) {
+		char *cstr = new char[s.length() + 1];
+		strcpy(cstr, s.c_str());
+		input_base = cstr;
+		pointer = input_base;
+	} else if (input_type == LEX_INPUT_FILE) {
+		SPIFFS_BEGIN();
+		file = FS_OPEN_FILE(SPIFFS, s.c_str());
+	}
 }
 
 void Lexer::Pointer(char *inp){
@@ -104,7 +115,13 @@ void Lexer::Pointer(char *inp){
 }
 
 char Lexer::Peek(){
-	return *pointer;
+	if (InputType == LEX_INPUT_FILE) {
+	if (file.available()) {
+        return file.peek();
+    }
+	} else if (InputType ==  LEX_INPUT_STRING) {
+		return *pointer;
+	}
 }
 
 char Lexer::PeekNext(){
@@ -112,12 +129,13 @@ char Lexer::PeekNext(){
 }
 
 char Lexer::Get(){
-	return *pointer++;
-}
-
-Token Lexer::SetToken(Token::Type typ, int val) //
-{
-	return Token(typ, val);
+	if (InputType == LEX_INPUT_FILE) {
+	if (file.available()) {
+        return file.read();
+    }
+	} else if (InputType ==  LEX_INPUT_STRING) {
+		return *pointer++;
+	}
 }
 
 Token Lexer::Next()
@@ -125,38 +143,37 @@ Token Lexer::Next()
 	Token token;
 	char last_c;
 	char temp_char;
-	int pt;
+	char *cpoint;
+	int len;
 	
 	while (IsSpace(Peek())){Get();column++;} // пропустить пробелы
 
 	last_c = Get();
 	if (IsLetterChar(last_c)) // если найдена буква
 	{
-		pt = 0;
+		len = 0;
 		temp_char = last_c;
 		while (true)
 		{
 			if (IsIdentifiedChar(temp_char))
 			{
-				if (pt < (C_BUFFER_LEN - 1))
+				if (len < (C_BUFFER_LEN - 1))
 				{
-					LEX_C_BUFFER[pt] = temp_char;
-					pt++;
+					LEX_C_BUFFER[len] = temp_char;
+					len++;
 					column++;
 				}
 			}
 			if (!IsIdentifiedChar(Peek()))
 			{
-				LEX_C_BUFFER[pt] = '\0';
+				LEX_C_BUFFER[len] = '\0';
 				if (IsReserved())
 				{
 					token = ReservedToken();
 					last_token = token;
 					return token;
-				}
-				else
-				{
-					char* cpoint = new char[C_BUFFER_LEN];
+				} else {
+					cpoint = new char[len + 1];
 					Copy_str(LEX_C_BUFFER, cpoint);
 					token.type = Token::Type::Identifier;
 					token.value.c = cpoint;
@@ -170,35 +187,34 @@ Token Lexer::Next()
 	else if (IsDigit(last_c)) // если найдена цифра
 	{
 		bool IsFloat = false;
-		pt = 0;
+		len = 0;
 		temp_char = last_c;
 		while (1)
 		{
 				if (IsDigit(temp_char))
 				{
-					if (pt < (C_BUFFER_LEN - 1))
+					if (len < (C_BUFFER_LEN - 1))
 					{
-						LEX_C_BUFFER[pt] = temp_char;
-						pt++;
+						LEX_C_BUFFER[len] = temp_char;
+						len++;
 						column++;
 					}
 				}
 				if (Peek() == '.') {
 					if (!IsFloat) {
 						IsFloat = true;
-						LEX_C_BUFFER[pt] = '.';
-						pt++;
+						LEX_C_BUFFER[len] = '.';
+						len++;
 						column++;
 					} else {
 						/*Ошибка!*/
 					}
 				} else if (!IsDigit(Peek())) {
-					LEX_C_BUFFER[pt] = '\0';
+					LEX_C_BUFFER[len] = '\0';
 					if (!IsFloat) {
 						token.value.i = String_to_int(LEX_C_BUFFER);
 						token.type = Token::Type::Int;
-					}
-					else {
+					} else {
 						token.value.f = String_to_float(LEX_C_BUFFER);
 						token.type = Token::Type::Float;
 					}
@@ -223,7 +239,7 @@ Token Lexer::Next()
 			}
 		}
 	}
-	else if (last_c == '\n') // Конец ввода
+	else if (last_c == '\n') // Конец строки
 	{
 		column = 1;
 		line++;
@@ -365,20 +381,20 @@ Token Lexer::Next()
 		last_token = token;
 		return token;
 	}
-	else if (last_c == '&') // И
-	{
-		column++;
-		token.type = Token::Type::And;
-		last_token = token;
-		return token;
-	}
-	else if (last_c == '|') // ИЛИ
-	{
-		column++;
-		token.type = Token::Type::Or;
-		last_token = token;
-		return token;
-	}
+	// else if (last_c == '&') // И
+	// {
+		// column++;
+		// token.type = Token::Type::And;
+		// last_token = token;
+		// return token;
+	// }
+	// else if (last_c == '|') // ИЛИ
+	// {
+		// column++;
+		// token.type = Token::Type::Or;
+		// last_token = token;
+		// return token;
+	// }
 	else if (last_c == '.') // точка (разделитель числа)
 	{
 		column++;
@@ -427,10 +443,16 @@ Token Lexer::Next()
 		last_token = token;
 		return token;
 	}
+	else if(InputType == LEX_INPUT_FILE && !file.available()) {
+		token.type = Token::Type::End;
+		last_token = token;
+		return token;
+	}
 	token.type = Token::Type::Unexpected;
 	last_token = token;
+	Serial.print("Unexpected symbol #");
+	Serial.println((uint8_t)last_c);
 	return token; // неожиданный символ
 }
-
 
 
