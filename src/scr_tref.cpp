@@ -1,7 +1,7 @@
 
 #include "scr_tref.h"
 
-bool Compare_strings(char* s1, char* s2)
+bool Compare_strings(char *s1, char *s2)
 {
 	for(int n = 0;;n++)
 	{
@@ -12,7 +12,7 @@ bool Compare_strings(char* s1, char* s2)
 	}
 }
 
-bool Compare_strings(const char s1[], char* s2)
+bool Compare_strings(const char s1[], char *s2)
 {
 	for(int n = 0;;n++)
 	{
@@ -23,7 +23,7 @@ bool Compare_strings(const char s1[], char* s2)
 	}
 }
 
-bool Compare_strings(char* s1, const char s2[])
+bool Compare_strings(char *s1, const char s2[])
 {
 	for(int n = 0;;n++)
 	{
@@ -45,7 +45,7 @@ bool Compare_strings(const char s1[], const char s2[])
 	}
 }
 
-void Copy_str(char* s1, char* s2)
+void Copy_str(char *s1, char *s2)
 {
 	for (int i = 0; i < 80; i++){
 		s2[i] = s1[i];
@@ -54,12 +54,21 @@ void Copy_str(char* s1, char* s2)
 	}
 }
 
-int String_to_int(char* s)
+void Copy_str(const char *s1, char *s2)
+{
+	for (int i = 0; i < 80; i++){
+		s2[i] = s1[i];
+		if (s1[i] == '\0')
+			return;
+	}
+}
+
+int Const_char_to_int(const char* s)
 {
 	return atoi(s);
 }
 
-float String_to_float(char* s)
+float Const_char_to_float(const char* s)
 {
 	return atof(s);
 }
