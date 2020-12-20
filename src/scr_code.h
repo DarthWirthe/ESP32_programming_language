@@ -1,6 +1,6 @@
 
-/*
-	Компилятор, заголовочный файл.
+/**
+**	Компилятор, заголовочный файл.
 */
 
 #pragma once
@@ -9,6 +9,9 @@
 
 #include <stdio.h>
 #include <vector>
+#include <string>
+#include <string.h>
+#include "scr_lib.h"
 #include "scr_opcodes.h"
 #include "scr_tref.h"
 #include "scr_types.h"
@@ -20,6 +23,7 @@ enum class OpType {
 	UnPlus,
 	UnMinus,
 	UnNot,
+	UnBitNot,
 	BinAdd,
 	BinSub,
 	BinMul,
@@ -31,8 +35,13 @@ enum class OpType {
 	BinNotEqual,
 	BinGreater,
 	BinGreaterOrEqual,
+	BinLeftShift,
+	BinRightShift,
 	BinAnd,
-	BinOr
+	BinOr,
+	BinBitAnd,
+	BinBitOr,
+	BinBitXor
 };
 
 enum class NodeType {
@@ -40,6 +49,7 @@ enum class NodeType {
 	ConstInt,
 	ConstFloat,
 	Var,
+	Prefix,
 	Function,
 	Array,
 	Operator,
@@ -57,11 +67,11 @@ typedef union {
 
 struct Node {
 	Node(){}
-	Node(uint8_t _type, NodeValueUnion _value) {
+	Node(NodeType _type, NodeValueUnion _value) {
 		type = _type;
 		value = _value;
 	}
-	uint8_t type;
+	NodeType type;
 	NodeValueUnion value;
 };
 
@@ -72,94 +82,135 @@ enum class VarType {
 	Int,
 	Float,
 	Function,
+	Array,
+	String,
 	ConstInt,
 	ConstFloat
 };
 
-// информация об объявленной ранее функции
+struct v_reg_struct {
+	VarType type;
+	unsigned 	size : 1, // битовые поля
+				is_const : 1,
+				is_int : 1,
+				is_pointer : 1,
+				unused : 28;
+};
+
+/* Флаги:
+** size: 0 - 8 бит, 1 - 32 бит
+** constant: 0 - переменная, 1 - константа
+** is_int: 0 - вещественный тип, 1 - целочисленный
+*/
+
+const v_reg_struct var_types_info[] = {
+	{VarType::Int, 1, 0, 1, 0},
+	{VarType::Float, 1, 0, 0, 0},
+	{VarType::ConstInt, 1, 1, 1, 0},
+	{VarType::ConstFloat, 1, 1, 0, 0},
+	{VarType::Array, 1, 0, 1, 1},
+	{VarType::String, 1, 0, 1, 1},
+	{VarType::Function, 1, 1, 1, 0}
+};
+
+struct var_reg_struct {
+	char *name;
+	VarType type;
+};
+
+const var_reg_struct var_types_list[] = {
+	{(char*)"int", VarType::Int},
+	{(char*)"float", VarType::Float},
+	{(char*)"const int", VarType::ConstInt},
+	{(char*)"const float", VarType::ConstFloat},
+	{(char*)"string", VarType::String}
+};
+
+struct func_arg_struct {
+	uint8_t type;
+};
+
 struct FuncData {
-	uint8_t args;
-	uint8_t cnst;
+	char *name; // имя
+	std::vector<func_arg_struct> args; // типы аргументов
+	uint32_t pointer; // указатель на функцию в коде
 };
 
 struct VarState {
-	~VarState(void);
-	VarState(){}
 	char *name; // имя переменной
-	uint8_t type; // тип переменной
-	uint8_t data; // аргументы / константа
-	uint8_t id; // номер ид
-};
-
-struct func_descr { // можно удалить
-	func_descr(void);
-	func_descr(uint8_t *start, uint8_t *end);
-	uint8_t *start_pt;
-	uint8_t *end_pt;
-};
-
-struct FuncPoint {
-	size_t c;
-	size_t pt;
-};
-
-struct FuncState {
-	char *name;
-	uint8_t locals_start;
-	uint8_t locals_count;
-	uint8_t max_stack;
-	uint8_t func_start;
-	std::vector<uint8_t> fcode;
-	FuncState *prev;
-	FuncState():
-	prev(nullptr)
+	VarState *parent; // родительская переменная
+	unsigned  	type : 8, // тип переменной
+				data : 8, // аргументы / константа
+				id : 8; // номер ид
+	VarState():
+	parent(nullptr)
 	{}
 };
 
-struct scope_info {
-	uint8_t *code_base; // указатель на начало
-	uint8_t locals_count; // количество переменных в окружении
-	uint8_t locals_start; // количество переменных, которое было до этого
-	uint8_t id; // ид (уровень вложенности)
-	uint8_t max_stack; // расширение кадра стека
-	scope_info *parent; // указатель на предыдущее звено
-	scope_info():
-	locals_count(0),
-	parent(nullptr)
+struct FuncState {
+	char *name;	
+	std::vector<uint8_t> fcode; // буфер кода
+	FuncState *prev; // указатель на пред. окружение
+	unsigned  	decl_funcs : 8, // количество функций, объявленных в функции
+				locals_count : 8, // количество переменных, объявленных в функции
+				max_stack : 8; // расширение стека
+	FuncState():
+	prev(nullptr)
 	{}
 };
 
 class Code {
 	public:
 		Code(void);
-		~Code();
+		void InternalException(int code);
+		void ErrorDeclared(char *name);
+		void ErrorNotDeclared(char *name);
+		void ErrorDeclaredFunction(char *name);
+		void ErrorNotDeclaredFunction(char *name);
 		void Add(uint8_t i);
 		void Add_08(uint8_t n);
 		void Add_16(uint16_t n);
 		void NewScope(char *name);
 		void CloseScope(void);
+		void RegisterLib(const char* name, const lib_reg *lib, size_t size);
 		int AddConstInt(int n);
 		int AddConstFloat(float n);
-		int AddLocal(char *name, VarType type);
-		void SetArgs(char *name, uint8_t args);
-		uint8_t GetArgs(char *name);
+		int AddConstString(char *s);
+		int FindConstString(char *s);
+		void CodeLoadVariable(VarType type, bool is_local, int index);
+		void CodeStoreVariable(VarType type, bool is_local, int index);
+		int PushVar(char *name, VarType type, bool is_local);
+		size_t AddFunction(char *name);
+		int FindFunction(char *name);
+		int FindBuiltInFunction(char *lib_label, char *name);
+		int FindBuiltInLib(char *lib_label);
+		void SetArgs(char *name, std::vector<func_arg_struct> args);
+		size_t GetArgs(char *name);
+		func_arg_struct GetArg(char *name, int n);
 		int FindLocal(char *name);
+		int FindGlobal(char *name);
+		int FindVariable(char *name, bool &is_local);
 		void CodeOperator(OpType t, bool IsFloat);
 		int FindConstInt(int n);
 		int FindConstFloat(float n);
 		int CodeConstInt(int n);
 		int CodeConstFloat(float n);
-		int DeclareConstVarInt(char *name, int n, VarType type, bool code);
-		//void DeclareConstVarFloat(char *name, float n, VarType type, bool code);
+		int CodeConstString(char *s);
 		void CodeJump(int shift, bool condition, bool expected);
-		void Expression(std::vector<Node> expr);
+		void ExprGenericOperation(Node n);
+		void Expression(std::vector<Node> expr, uint8_t _max_st = 0);
 		int MainScope(void);
 		void MainScopeEnd(int pos_const);
-		void LocalLoad(char *name);
-		void LocalStore(char *name);
-		int LocalDeclare(char *name, VarType type);
-		FuncPoint FunctionDeclare(char *name);
-		void FunctionClose(FuncPoint p);
+		void LoadLocal(char *name);
+		void StoreLocal(char *name);
+		int DeclareLocal(char *name, VarType type);
+		void LoadVariable(char *name, bool &is_local);
+		void StoreVariable(char *name, bool &is_local);
+		void LoadGlobal(char *name);
+		void StoreGlobal(char *name);
+		int DeclareGlobal(char *name, VarType type);
+		size_t FunctionDeclare(char *name);
+		void FunctionClose(char *name, size_t p);
 		void CallFunction(char *name, int args);
 		void ReturnOperator(VarType type);
 		size_t StartIfStatement(void);
@@ -168,9 +219,11 @@ class Code {
 		void CloseIfStatement(std::vector<size_t> labels);
 		size_t StartWhileStatement(void);
 		void CloseWhileStatement(size_t ws_pt, size_t condition);
-		void ArrayDeclaration(char *name);
-		void ArrayLoad(char *name);
-		void ArrayStore(char *name);
+		void ArrayDeclaration(char *name, VarType type);
+		size_t ArrayUnknownLengthStart(void);
+		void ArrayUnknownLengthEnd(size_t pos, int len);
+		void LoadArray(char *name);
+		void StoreArray(char *name);
 		size_t GetFuncCodeSize(void); 
 		num_t* GetConsts(void);
 		uint8_t* GetCode(void);
@@ -178,11 +231,15 @@ class Code {
 		size_t GetConstsCount(void);
 		// ###
 	private:
-		FuncState *current_scope = nullptr;
-		std::vector<FuncData> declared_functions;
-		std::vector<uint8_t> bytecode;
-		std::vector<num_t> num_consts;
-		std::vector<VarState> locals;
+		FuncState *current_scope = nullptr; // текущее окружение
+		std::vector<FuncData> declared_functions; // локальные функции
+		std::vector<uint8_t> bytecode; // байткод
+		std::vector<num_t> num_consts; // число константа
+		std::vector<char*> str_consts; // строка константа
+		std::vector<VarState> locals; // локальная переменная
+		std::vector<VarState> globals; // глобальная переменная
+		std::vector<lib_struct> cpp_lib; // встроенные библиотеки
+		size_t total_str_length;
 		size_t main_scope_p;
 		size_t f_pt;
 };
