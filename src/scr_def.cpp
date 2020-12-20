@@ -3,21 +3,26 @@
 #include "HardwareSerial.h"
 
 LangState::LangState() {
-	
+	heap_size = 256;
 }
 
 void LangState::Compile(int input_type, std::string s) {
 	Lexer *l = new Lexer(input_type, s);
 	parser_obj = new Parser(l);
-	parser_obj->Parse();
+	int exit_code = parser_obj->Parse();
 	code_base = parser_obj->GetCode();
 	consts = parser_obj->GetConsts();
 }
 
-uint8_t LangState::Run() {
-	vm = new VM(256, code_base, consts);
-	vm->Run();
-	return 0;
+int LangState::Run() {
+	int vm_exit = 0;
+	vm = new VM(heap_size, code_base, consts, nullptr, 0);
+	try {
+		vm_exit = vm->Run();
+	} catch (int code) {
+		vm_exit = code;
+	}
+	return vm_exit;
 }
 
 void LangState::LoadString(std::string s) {
