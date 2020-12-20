@@ -1,17 +1,34 @@
 
-/*
-	Виртуальная машина
+/** scr_vm.cpp
+*** Виртуальная машина
 */
 
 #include "scr_vm.h"
+#include "utils/scr_debug.h"
 #include "HardwareSerial.h"
 
 // Макросы для работы со стеком
 
-#define PUSH(v) *++sp = (v)
-#define POP() (*sp--)
-#define TOP() (*sp)
-#define SET_TOP(v) *sp = (v)
+#define PUSH(v) 	 *++sp = (v)
+#define POP() 		 (*sp--)
+#define TOP()		 (*sp)
+#define SET_TOP(v)	 *sp = (v)
+
+// Макрос для ошибок
+
+#define VM_ERR(err) throw (err)
+
+// Макрос для отладки
+
+#define VM_DBG
+
+#ifdef VM_DBG
+	#define DEBUGF(__f, ...) __DEBUGF__(__f, ##__VA_ARGS__)
+#else
+	#define DEBUGF(__f, ...)
+#endif // VM_DBG
+
+// Полезные функции
 
 static inline int_t uint_to_int32(uint32_t val) {
 	if (val & (IMMEDIATE_MASK_32 >> 1))
@@ -51,378 +68,450 @@ static inline float stack_to_float(stack_t val) {
 	return v.f[0];
 }
 
-// инициализация стека, возвращает указатель на стек
-
-static stack_t* stack_init() {
-	return 0;//(stack_t*)heap->get_base();
-	//heap->steal(DEFAULT_STACK_SIZE * sizeof(stack_t));
-}
 
 VM::VM(){}
 
-VM::VM(uint16_t h_size, uint8_t *code, num_t *c) {
+VM::VM(uint16_t h_size, uint8_t *ptcode, num_t *nums, char *strs, int g_count) {
 	heap = new Heap(h_size);
-	code_base = code;
-	consts = c;
+	code_base = ptcode;
+	consts_num_base = nums;
+	consts_str_base = strs;
+	globals_count = g_count;
 }
 
-template <typename T>
-void DBG(T c) {
-	Serial.println(c);
+stack_t VM::LoadString(char *c) {
+	size_t length = strlen(c);
+	uint32_t id = heap->alloc(length);
+	return id;
 }
 
-template <typename T>
-void vm_error(T c) {
-	Serial.println(c);
-	throw "";
-}
-
-void stackdump(stack_t *sb, stack_t *sp) {
-//###
-	uint32_t stack_length = (uint32_t)(sp - sb) + 1;
-	Serial.print("stack length: ");
-	Serial.print(stack_length);
-	Serial.print(" (");
-	Serial.print(stack_length * 4);
-	Serial.println(" bytes)");
-	Serial.print("stack dump: ");
-	uint32_t pt = (uint32_t)sp;
-	for (uint32_t i = (uint32_t)sb; i <= pt; i+=sizeof(stack_t)) {
-		Serial.print(sb[i]);
-		Serial.print(" ");
+void stack_dump(stack_t *sb, stack_t *sp) {
+	uint32_t stack_length = (uint32_t)(sp - sb + 1);
+	DEBUGF("stack length: %u (%u bytes)\n", stack_length, stack_length * 4);
+	DEBUGF("stack dump: ");
+	while (sb <= sp) {
+		DEBUGF("%u ", *sb);
+		sb++;
 	}
-	Serial.println();
-//###
+	DEBUGF("\n");
 }
 
 /**
-	instr - регистр инструкции
-	pc - указатель программы
-	sp - указатель стека
-	fp - указатель кадра стека
-	locals_pt - указатель на локальные переменные
-	consts_pt - указатель на константы
+  * pc - указатель программы
+  * sp - указатель стека
+  * fp - указатель кадра стека
+  * locals_pt - указатель на локальные переменные
+  * globals_pt - указатель на глобальные переменные
 **/
 
-void VM::Run() {
-	stack_t *stack_base = (stack_t*)(heap->get_heap()); // основание стека
-	register uint8_t instr, *pc;
-	register stack_t *sp = stack_base - 1; 
-	stack_t *fp = nullptr;
-	register uint32_t tmp1, tmp2; // беззнаковые числа
-	register int_t i0, i1; // знаковые числа
+int VM::Run() {
+	stack_t *stack_base = (stack_t*)(heap->heap); // основание стека
+	uint8_t instr, *pc; // указатель программы
+	stack_t *sp = stack_base - 1; // указатель стека
+	stack_t *fp = 0; // указатель кадра стека
+	uint32_t tmp1, tmp2; // без знака
+	int_t i0, i1; // со знаком
 	float f0, f1; // вещественные числа
-	stack_t *ptr0, *ptr1, *locals_pt;
-	uint8_t *return_pt;
-	num_t *consts_pt = consts;
-	
+	stack_t *ptr0s, *ptr1s, *ptr2s, *locals_pt, *globals_pt;
+	num_t *consts_n = consts_num_base; // указатель на числовые константы
+	char *consts_s = consts_str_base; // указатель на строковые константы
 	pc = code_base;
-	
-	heap->mem_steal(sizeof(stack_t) * 1);
+	heap->mem_steal(sizeof(stack_t) * (globals_count + 1));
 
-/**/Serial.print("#Starting virtual machine [");
-/**/Serial.print(heap->get_free_size());
-/**/Serial.println(" bytes available]");
-	
+	DEBUGF("#Starting virtual machine [%.3f kB available]\n", (float)heap->get_free_size() / 1024);
+
 	do {
-		instr = pc[0];
-		pc++;
-		if (instr == I_OP_NOP) {
-		}
-		else if (instr == I_PUSH) {
-			PUSH(((stack_t*)pc)[0]);
-			pc += 4;
-		}
-		else if (instr == I_POP) {
-			POP();
-		}
-		// Вызов функции
-		else if (instr == I_CALL) { //[call][args] -> [func_pt][locals][max_stack]
-			DBG("CALL");
-			tmp1 = POP(); // адрес функции берётся из стека
-			tmp2 = pc[0]; // аргументы берутся из кода
-/**/		Serial.println(tmp1);
-			return_pt = pc + 1; // запоминить текущий указатель (+1 байт - кол-во аргументов)
-/**/		Serial.print("return_pt = ");
-/**/		Serial.println((uint32_t)return_pt);
-			pc = (uint8_t*)(code_base + tmp1); // в месте перехода должен быть FUNC_PT
-			if (pc[0] != (uint8_t)I_FUNC_PT) // если его нет, то сообщение об ошибке
-				{vm_error("Error: Expected function");}
-			tmp1 = pc[1]; // tmp1 - кол-во переменных
-			sp -= tmp2; // добавляет аргументы в локальные переменные
-			locals_pt = sp + 1; // запомнить расположение переменных
-		// %%%%%%% Новый кадр [[аргументы][локальные переменные]][пред.кадр][адр.возвр.][нач.указатель][...]
-/**/		DBG("NewStackFrame");
-			// * увеличение стека: 3 байта данные для возврата, локальные переменные, аргументы, расширение
-			heap->mem_steal(sizeof(stack_t) * (FRAME_REQUIREMENTS + tmp1 + tmp2 + pc[2]));
-/**/		Serial.print("heap->steal ");
-/**/		Serial.print(sizeof(stack_t) * FRAME_REQUIREMENTS + tmp1 + tmp2 + pc[2]);
-/**/		Serial.print(" bytes (");
-/**/		Serial.print(heap->get_free_size());
-/**/		Serial.println(" bytes free)");
-			sp += tmp1; // создаётся место под локальные переменные
-			PUSH((stack_t)fp); // адрес предыдущего кадра (=указатель)
-			fp = sp;
-			PUSH((stack_t)return_pt); // адрес возврата указателя (=указатель + 4 байта)
-			PUSH((stack_t)locals_pt); // запомнить резерв, чтобы правильно удалить кадр (=указатель + 8 байт)
-/**/		stackdump(stack_base, sp);
-			
-			pc += 3;
-		}
-		else if (instr == I_CALL_B) {
-			DBG("CALL_B");
-		}
-		else if (instr == I_OP_RETURN || 
-		instr == I_OP_IRETURN ||
-		instr == I_OP_FRETURN) {
-			DBG("RETURN");
-/**/		Serial.print("fp = ");
-/**/		Serial.println((uint32_t)fp);
-			if (instr == I_OP_IRETURN || instr == I_OP_FRETURN)
-				tmp2 = POP(); // запомнить возвращаемое значение
-/**/		Serial.print("Before: ");
-/**/		stackdump(stack_base, sp);
-			ptr0 = (stack_t*)(fp[2]) - 1; // указатель на начало кадра
-			ptr1 = (stack_t*)(heap->get_relative_base()) - 1; // указатель на конец кадра
-			Serial.print("stack block length: ");
-			Serial.println(ptr1 - stack_base);
-			pc = (uint8_t*)fp[1]; // перенос указателя программы обратно
-			fp = (stack_t*)fp[0]; // перенос указателя кадра обратно
-			if (fp) {
-				//ptr1 = (stack_t*)(fp[2]); // указатель на конец старого кадра
-				locals_pt = (stack_t*)fp[2]; // используем старые переменные
+		instr = *pc++;
+		switch (instr) {
+			case I_OP_NOP:
+			break;
+			case I_PUSH: {
+				DEBUGF("I_PUSH\n");
+				PUSH(*((stack_t*)pc));
+				pc += 4;
+			break;
 			}
-			else { // возврат из первого окружения = конец программы
-/**/			Serial.println("End of program!");
-				break;
+			case I_POP: {
+				DEBUGF("I_POP\n");
+				POP();
+			break;
 			}
-		// %%%%%% возврат в предыдущую функцию
-			sp = ptr0; // удаление кадра
-			heap->mem_unsteal(sizeof(stack_t) * (ptr1 - ptr0)); // возвращает память в кучу
-/**/		Serial.print("heap->unsteal ");
-/**/		Serial.print(sizeof(stack_t) * (uint32_t)(ptr1 - ptr0));
-/**/		Serial.print(" bytes (");
-/**/		Serial.print(heap->get_free_size());
-/**/		Serial.println(" bytes free)");
-/**/		Serial.print("After: ");
-/**/		stackdump(stack_base, sp);
-/**/		ptr1 = (stack_t*)(heap->get_relative_base()) - 1; // убрать
-/**/		Serial.print("stack block length: ");
-/**/		Serial.println(ptr1 - stack_base);
-		// %%%%%%
-			if (instr == I_OP_IRETURN || instr == I_OP_FRETURN)
-				PUSH(tmp2);
-		}
-		// Арифметические операции с целыми числами
-		else if (instr >= I_OP_IADD && instr <= I_OP_GREQ) {
-			i0 = uint_to_int32(POP());
-			i1 = uint_to_int32(POP());
-			switch(instr) {
-				case I_OP_IADD: DBG("OP_IADD"); // сложение	
-					i1 += i0; break;
-				case I_OP_ISUB: DBG("OP_ISUB"); // вычитание
-					i1 -= i0; break;
-				case I_OP_IMUL: DBG("OP_IMUL"); // умножение
-					i1 *= i0; break;
-				case I_OP_IDIV: DBG("OP_IDIV"); // деление
-					i1 /= i0; break;
-				case I_OP_IREM: DBG("OP_IREM"); // остаток
-					i1 %= i0; break;
-				case I_OP_ISHL: DBG("OP_ISHL"); // сдвиг влево
-					i1 <<= i0; break;
-				case I_OP_ISHR: DBG("OP_ISHR"); // сдвиг вправо
-					i1 >>= i0; break;
-				case I_OP_IAND: DBG("OP_IAND"); // и - побитовое
-					i1 &= i0; break;
-				case I_OP_IOR: DBG("OP_IOR"); // или - побитовое
-					i1 |= i0; break;
-				case I_OP_IXOR: DBG("OP_IXOR");// искл. или - побитовое
-					i1 ^= i0; break;
-				case I_OP_LESS: DBG("OP_LESS"); // меньше
-					i1 = i1 < i0; break;
-				case I_OP_LESSEQ: DBG("OP_LESSEQ"); // меньше или равно
-					i1 = i1 <= i0; break;
-				case I_OP_EQ: DBG("OP_EQ"); // равно
-					i1 = i1 == i0; break;
-				case I_OP_NOTEQ: DBG("OP_NOTEQ"); // не равно
-					i1 = i1 != i0; break;
-				case I_OP_GR: DBG("OP_GR"); // больше
-					i1 = i1 > i0; break;
-				case I_OP_GREQ: DBG("OP_GREQ"); // больше или равно
-					i1 = i1 >= i0; break;
+			// Вызов функции
+			case I_CALL: {
+				DEBUGF("CALL\n");
+				tmp1 = POP(); // адрес функции берётся из стека
+				tmp2 = pc[0]; // кол-во аргументов берётся из кода
+				uint8_t *return_pt = pc + 1; // запоминить текущий указатель
+				pc = (uint8_t*)(code_base + tmp1); // в месте перехода должен быть FUNC_PT
+				if (pc[0] != (uint8_t)I_FUNC_PT) // если его нет, то сообщение об ошибке
+					VM_ERR(VM_ERR_EXPECTED_FUNCTION);
+				uint8_t *func_ref = pc; // запомнить pc
+				tmp1 = pc[1]; // tmp1 - кол-во переменных
+				sp -= tmp2; // добавляет аргументы в локальные переменные
+				locals_pt = sp + 1; // запомнить расположение переменных
+				DEBUGF("return_pt = %u\n", (uint32_t)return_pt);
+				DEBUGF("[CALL] Args = %u\n", tmp2);
+				DEBUGF("[CALL] Locals = %u\n", tmp1);
+				DEBUGF("[CALL] Max stack = %u\n", pc[2]);
+				DEBUGF("NewStackFrame\nheap->steal %u bytes (%u bytes free)\n",
+				sizeof(stack_t) * (FRAME_REQUIREMENTS + tmp1 + pc[2]), heap->get_free_size());
+				// ...[[аргументы][локальные переменные]][пред.кадр][адр.возвр.][нач.кадра][функция]...
+				// увеличение стека: 4 байта данные для возврата, локальные переменные, аргументы, расширение
+				heap->mem_steal(sizeof(stack_t) * (FRAME_REQUIREMENTS + tmp1 + pc[2]));
+				sp += tmp1; // создаётся место под локальные переменные
+				PUSH((stack_t)fp); // адрес предыдущего кадра (=указатель)
+				fp = sp;
+				PUSH((stack_t)return_pt); // адрес возврата указателя (=указатель + 4 байта)
+				PUSH((stack_t)locals_pt); // начало кадра (=указатель + 8 байт)
+				PUSH((stack_t)func_ref); // конец кадра (=указатель + 12 байт)
+				stack_dump(stack_base, sp);
+				pc += 3;
+			break;
 			}
-			PUSH(i1);
-		}
-		// Арифметические операции с вещественными числами
-		else if (instr >= I_OP_FADD && instr <= I_OP_FREM) {
-			f0 = stack_to_float(POP());
-			f1 = stack_to_float(POP());
-			switch(instr) {
-				case I_OP_FADD: DBG("OP_FADD"); // сложение
-					f1 += f0; break;
-				case I_OP_FSUB: DBG("OP_FSUB"); // вычитание
-					f1 -= f0; break;
-				case I_OP_FMUL: DBG("OP_FMUL"); // умножение
-					f1 *= f0; break;
-				case I_OP_FDIV: DBG("OP_FDIV"); // деление
-					f1 /= f0; break;
-				case I_OP_FREM: DBG("OP_FREM"); // остаток
-					//f1 %= f0; 
-					break;	
+			case I_CALL_B: {
+				DEBUGF("CALL_B\n");
+				tmp1 = pc[0]; // кол-во аргументов берётся из кода
+				this->_sp = sp; // указатель передаётся для функций
+				/* Вызов функции */
+				sp = this->_sp; // функции могли изменить указатель
+			break;
 			}
-			PUSH(float_to_stack(f1));
-		}
-		else if (instr == I_OP_INOT) { // отрицание
-			DBG("OP_INOT");
-			PUSH(!uint_to_int32(POP()));
-		}
-		else if (instr == I_OP_IUNEG) { // ун. минус
-			DBG("OP_IUNEG");
-			PUSH(-uint_to_int32(POP()));
-		}
-		else if (instr == I_OP_IUPLUS) { // ун. плюс
-			DBG("OP_IUPLUS");
-			i0 = uint_to_int32(POP());
-			(i0 < 0) 
-			? PUSH(-i0) 
-			: PUSH(i0);
-		}
-		else if (instr == I_OP_FUNEG) { // ун. минус для чисел с плавающей точкой
-			DBG("OP_FUNEG");
-			f0 = 0;//uint_to_int32(POP());
-			PUSH(-f0);
-		}
-		else if (instr == I_OP_FUPLUS) { // ун. плюс для чисел с плавающей точкой
-			DBG("OP_FUPLUS");
-			f0 = 0;//uint_to_int32(POP());
-			(f0 < 0) 
-			? PUSH(-f0) 
-			: PUSH(f0);
-		}
-		// Из переменных на вершину стека
-		else if (instr == I_OP_ILOAD) {
-			DBG("OP_LOADLOCAL");
-			tmp1 = pc[0]; // номер
-			Serial.print("var #");
-			Serial.println(tmp1);
-			PUSH(locals_pt[tmp1]); // значение
-			Serial.println(uint_to_int32(locals_pt[tmp1]));
-			pc += 1;
-		}
-		// Из стека в переменные
-		else if (instr == I_OP_ISTORE) {	
-			DBG("OP_STORELOCAL");
-			tmp1 = pc[0]; // номер переменной
-			Serial.print("var #");
-			Serial.println(tmp1);
-			locals_pt[tmp1] = POP(); // значение
-			Serial.println(uint_to_int32(locals_pt[tmp1]));
-			pc += 1;
-		}
-		// Из констант на вершину стека (целое число)
-		else if (instr == I_OP_LOADICONST) {
-			DBG("OP_LOADICONST");
-			tmp1 = pc[0]; //
-			PUSH(consts_pt[tmp1].i);
-			Serial.println(consts_pt[tmp1].i);
-			pc += 1;
-		}
-		// Из констант на вершину стека (вещественное число)
-		else if (instr == I_OP_LOADFCONST) {
-			DBG("OP_LOADFCONST");
-			tmp1 = pc[0]; //
-			PUSH(consts_pt[tmp1].f);
-			Serial.println(consts_pt[tmp1].f);
-			pc += 1;
-		}
-		// Безусловный переход
-		else if (instr == I_OP_JMP) { // 16-битный сдвиг
-			DBG("OP_JMP");
-			tmp1 = pc[0] << 8 | pc[1];
-			i0 = uint_to_short16(tmp1);
-			pc = (uint8_t*)((int)pc + i0); // получить относительный адрес для переноса указателя
-			Serial.println(i0);
-		}
-		// Условный переход (если на вершине стека 0)
-		else if (instr == I_OP_JMPZ) { // 16-битный сдвиг
-			DBG("OP_JMPZ");
-			tmp1 = POP();
-			tmp2 = pc[0] << 8 | pc[1];
-			i0 = uint_to_short16(tmp2);
-			if (tmp1 == 0)
-				pc = (uint8_t*)((int)pc + i0); // получить относительный адрес для переноса указателя
-			else
+			case I_OP_RETURN:
+			case I_OP_IRETURN:
+			case I_OP_FRETURN: {
+				DEBUGF("RETURN\n");	
+				if (instr == I_OP_IRETURN || instr == I_OP_FRETURN)
+					tmp2 = POP(); // запомнить возвращаемое значение
+				DEBUGF("fp = %u\n", (uint32_t)fp);
+				DEBUGF("Before: ");
+				stack_dump(stack_base, sp);
+				DEBUGF("[RETURN] current fp = %u\n", (uint32_t)fp);
+				DEBUGF("[RETURN] fp = %u\n", fp[0]);
+				DEBUGF("[RETURN] return_pt = %u\n", fp[1]);
+				DEBUGF("[RETURN] locals_pt = %u\n", fp[2]);
+				DEBUGF("[RETURN] stack_end = %u\n", (uint32_t(heap->get_relative_base() - 4)));
+				DEBUGF("stack block length = %u\n", 
+				(uint32_t)heap->get_relative_base() - (uint32_t)stack_base - 4);
+				if (fp[0]) {
+					ptr0s = (stack_t*)fp[2] - 1; // указатель на конец пред. кадра
+					ptr1s = (stack_t*)(fp - *((uint8_t*)(fp[3] + 1))); // указатель на начало кадра
+					ptr2s = (stack_t*)(fp + FRAME_REQUIREMENTS + *((uint8_t*)(fp[3] + 2))); // указатель на конец кадра
+					pc = (uint8_t*)fp[1]; // перенос указателя программы обратно
+					fp = (stack_t*)fp[0]; // перенос указателя кадра обратно
+					locals_pt = (stack_t*)fp[2]; // используем старые переменные
+				} else {
+					// возврат из первого окружения = конец программы
+					DEBUGF("End of program!\n");
+					goto vm_end;
+				}
+				// %%%%%% возврат в предыдущую функцию
+				sp = ptr0s; // удаление кадра
+				heap->mem_unsteal(sizeof(stack_t) * (ptr2s - ptr1s)); // возвращает память в кучу
+				DEBUGF("heap->unsteal %u bytes (%u bytes free)\n", 
+				sizeof(stack_t) * (ptr2s - ptr1s), heap->get_free_size());
+				DEBUGF("After: ");
+				stack_dump(stack_base, sp);
+				DEBUGF("stack block length: %u\n",
+				(uint32_t)heap->get_relative_base() - (uint32_t)stack_base - 4);
+				if (instr == I_OP_IRETURN || instr == I_OP_FRETURN)
+					PUSH(tmp2);
+			break;
+			}
+			// Арифметические и логические операции с целыми числами
+			case I_OP_IADD: DEBUGF("OP_IADD\n");
+				i0 = static_cast<int>(POP());
+				*sp = static_cast<int>(*sp) + i0;
+			break;
+			case I_OP_ISUB: DEBUGF("OP_ISUB\n");
+				i0 = static_cast<int>(POP());
+				*sp = static_cast<int>(*sp) - i0;
+			break;
+			case I_OP_IMUL: DEBUGF("OP_IMUL\n");
+				i0 = static_cast<int>(POP());
+				*sp = static_cast<int>(*sp) * i0;
+			break;
+			case I_OP_IDIV: DEBUGF("OP_IDIV\n");
+				i0 = static_cast<int>(POP());
+				*sp = static_cast<int>(*sp) / i0;
+			break;
+			case I_OP_IREM: DEBUGF("OP_IREM\n");
+				i0 = static_cast<int>(POP());
+				*sp = static_cast<int>(*sp) % i0;
+			break;
+			case I_OP_ISHL:
+			case I_OP_ISHR:
+			case I_OP_IAND:
+			case I_OP_IOR:
+			case I_OP_IBAND:
+			case I_OP_IBOR:
+			case I_OP_IXOR:
+			case I_OP_LESS:
+			case I_OP_LESSEQ:
+			case I_OP_EQ:
+			case I_OP_NOTEQ:
+			case I_OP_GR:
+			case I_OP_GREQ:
+				i0 = static_cast<int>(POP());
+				i1 = static_cast<int>(*sp);
+				switch (instr) {
+					case I_OP_ISHL: DEBUGF("OP_ISHL\n"); // сдвиг влево
+						*sp = i1 << i0; break;
+					case I_OP_ISHR: DEBUGF("OP_ISHR\n"); // сдвиг вправо
+						*sp = i1 >> i0; break;
+					case I_OP_IAND: DEBUGF("OP_IAND\n"); // и - логическое
+						*sp = i1 && i0; break;
+					case I_OP_IOR: DEBUGF("OP_IOR\n"); // или - логическое
+						*sp =  i1 || i0; break;
+					case I_OP_IBAND: DEBUGF("OP_IBAND\n"); // и - побитовое
+						*sp = i1 & i0; break;
+					case I_OP_IBOR: DEBUGF("OP_IBOR\n"); // или - побитовое
+						*sp = i1 | i0; break;
+					case I_OP_IXOR: DEBUGF("OP_IXOR\n");// искл. или - побитовое
+						*sp = i1 ^ i0; break;
+					case I_OP_LESS: DEBUGF("OP_LESS\n"); // меньше
+						*sp = i1 < i0; break;
+					case I_OP_LESSEQ: DEBUGF("OP_LESSEQ\n"); // меньше или равно
+						*sp = i1 <= i0; break;
+					case I_OP_EQ: DEBUGF("OP_EQ\n"); // равно
+						*sp = i1 == i0; break;
+					case I_OP_NOTEQ: DEBUGF("OP_NOTEQ\n"); // не равно
+						*sp = i1 != i0; break;
+					case I_OP_GR: DEBUGF("OP_GR\n"); // больше
+						*sp = i1 > i0; break;
+					case I_OP_GREQ: DEBUGF("OP_GREQ\n"); // больше или равно
+						*sp = i1 >= i0; break;
+				}
+			break;
+			// Арифметические операции с вещественными числами
+			case I_OP_FADD:
+			case I_OP_FSUB:
+			case I_OP_FMUL:
+			case I_OP_FDIV:
+			case I_OP_FREM:
+				f0 = static_cast<float>(POP());
+				f1 = static_cast<float>(*sp);
+				switch (instr) {
+					case I_OP_FADD: DEBUGF("OP_FADD\n"); // сложение
+						f1 += f0; break;
+					case I_OP_FSUB: DEBUGF("OP_FSUB\n"); // вычитание
+						f1 -= f0; break;
+					case I_OP_FMUL: DEBUGF("OP_FMUL\n"); // умножение
+						f1 *= f0; break;
+					case I_OP_FDIV: DEBUGF("OP_FDIV\n"); // деление
+						f1 /= f0; break;
+					case I_OP_FREM: DEBUGF("OP_FREM\n"); // остаток
+						//f1 %= f0; 
+						break;	
+				}
+				*sp = float_to_stack(f1);
+			break;
+			case I_OP_IBNOT: // отрицание
+				DEBUGF("OP_IBNOT\n");
+				i0 = ~(static_cast<int>(*sp));
+				*sp = i0;
+			break;
+			case I_OP_INOT: // отрицание
+				DEBUGF("OP_INOT\n");
+				i0 = !(static_cast<int>(*sp));
+				*sp = i0;
+			break;
+			case I_OP_IUNEG: // ун. минус
+				DEBUGF("OP_IUNEG\n");
+				i0 = -(static_cast<int>(*sp));
+				*sp = i0;
+			break;
+			case I_OP_IUPLUS: // ун. плюс
+				DEBUGF("OP_IUPLUS\n");
+				i0 = static_cast<int>(POP());
+				(i0 < 0)
+				? PUSH(-i0)
+				: PUSH(i0);
+			break;
+			case I_OP_FUNEG: // ун. минус для чисел с плавающей точкой
+				DEBUGF("OP_FUNEG\n");
+				f0 = static_cast<float>(*sp);
+				*sp = -f0;
+			break;
+			case I_OP_FUPLUS: // ун. плюс для чисел с плавающей точкой
+				DEBUGF("OP_FUPLUS\n");
+				f0 = 0;
+				(f0 < 0) 
+				? PUSH(-f0) 
+				: PUSH(f0);
+			break;
+			// Из переменных на вершину стека
+			case I_OP_ILOAD:
+				DEBUGF("OP_LOADLOCAL\n");
+				tmp1 = *pc++; // номер переменной
+				i0 = static_cast<int>(locals_pt[tmp1]);
+				PUSH(i0); // значение
+				DEBUGF("#%u = %d\n", tmp1, i0);
+			break;
+			// Из стека в переменные
+			case I_OP_ISTORE:	
+				DEBUGF("OP_STORELOCAL\n");
+				tmp1 = *pc++; // номер переменной
+				i0 = static_cast<int>(POP());
+				locals_pt[tmp1] = i0; // значение
+				DEBUGF("#%u = %d\n", tmp1, i0);
+			break;
+			// Из констант на вершину стека (целое число)
+			case I_OP_LOADICONST:
+				DEBUGF("OP_LOADICONST\n");
+				tmp1 = *((uint16_t*)(pc)); // позиция
+				DEBUGF("#%u = %d\n", tmp1, consts_n[tmp1].i);
+				PUSH(consts_n[tmp1].i);
 				pc += 2;
-			Serial.println(i0);
-		}
-		// Условный переход (если на вершине стека не 0)
-		else if (instr == I_OP_JMPNZ) { // 16-битный сдвиг
-			DBG("OP_JMPNZ");
-			tmp1 = POP();
-			tmp2 = pc[0] << 8 | pc[1];
-			i0 = uint_to_short16(tmp2);
-			if (tmp1 != 0)
-				pc = (uint8_t*)((int)pc + i0); // получить относительный адрес для переноса указателя
-			else
+			break;
+			// Из констант на вершину стека (вещественное число)
+			case I_OP_LOADFCONST:
+				DEBUGF("OP_LOADFCONST\n");
+				tmp1 = *((uint16_t*)(pc)); // позиция
+				DEBUGF("#%u = %f\n", tmp1, consts_n[tmp1].f);
+				PUSH(consts_n[tmp1].f);
 				pc += 2;
-			Serial.println(i0);
-		}
-		else if (instr == I_FUNC_PT) {
-		}
-		else if (instr == I_OP_ITOF) {
-			
-		}
-		else if (instr == I_OP_FTOI) {
-			
-		}
-		else if (instr == I_OP_GLOAD) {
-			
-		}
-		else if (instr == I_OP_GSTORE) {
-			
-		}
-		// Создание массива определённого размера в байтах
-		else if (instr == I_OP_NEWARRAY) { // массив неопределённого типа
-			tmp1 = POP(); // длина массива из стека(байт)
-			PUSH((uint32_t)heap->alloc(tmp1)); // ид массива в стек
-		}
-		else if (instr == I_OP_IALOAD) { // только int
-			tmp1 = POP(); // ид из стека
-			tmp2 = POP(); // индекс из стека
-			PUSH(((int_t*)heap->get_addr(tmp1))[tmp2]);
-		}
-		else if (instr == I_OP_IASTORE) { // только int // mas[4-2] = 5 + 5;
-			i0 = uint_to_int32(POP()); // результат выражения из стека
-			tmp1 = POP(); // ид из стека
-			tmp2 = POP(); // индекс из стека
-			((int_t*)heap->get_addr(tmp1))[tmp2] = i0;
-		}
-		else if (instr == I_OP_BALOAD) { // только 8-битные числа
-			tmp1 = POP(); // ид из стека
-			tmp2 = POP(); // индекс из стека
-			PUSH(((uint8_t*)heap->get_addr(tmp1))[tmp2]);
-		}
-		else if (instr == I_OP_BASTORE) { // только 8-битные числа // mas[0] = "m";
-			i0 = uint_to_int32(POP()); // результат выражения из стека
-			tmp1 = POP(); // ид из стека
-			tmp2 = POP(); // индекс из стека
-			((uint8_t*)heap->get_addr(tmp1))[tmp2] = i0;
-		}
-		else if (instr == I_OP_LOAD0) {
-			DBG("I_OP_LOAD0");
-			PUSH(0);
-		}
-		else {
-			DBG("Error: Unknown instruction");
-			DBG(instr);
+			break;
+			case I_OP_LOADSTRING:
+				DEBUGF("OP_LOADSTRING\n");
+				*sp = LoadString(consts_s + *sp);
+			break;
+			// Безусловный переход
+			case I_OP_JMP: // 16-битный сдвиг
+				DEBUGF("OP_JMP\n");
+				pc += uint_to_short16(*((uint16_t*)(pc))); // перенос указателя
+				//DEBUGF("%d\n", i0);
+			break;
+			// Условный переход (если на вершине стека 0)
+			case I_OP_JMPZ: // 16-битный сдвиг
+				DEBUGF("OP_JMPZ\n");
+				tmp1 = POP();
+				if (tmp1 == 0)
+					pc += uint_to_short16(*((uint16_t*)(pc))); // перенос указателя
+				else
+					pc += 2;
+				//DEBUGF("%d\n", i0);
+			break;
+			// Условный переход (если на вершине стека не 0)
+			case I_OP_JMPNZ: // 16-битный сдвиг
+				DEBUGF("OP_JMPNZ\n");
+				tmp1 = POP();
+				if (tmp1 != 0)
+					pc += uint_to_short16(*((uint16_t*)(pc))); // перенос указателя
+				else
+					pc += 2;
+				//DEBUGF("%d\n", i0);
+			break;
+			case I_FUNC_PT:
+			break;
+			case I_OP_ITOF:
+				DEBUGF("OP_ITOF\n");
+				f0 = (float)uint_to_int32(POP());
+				PUSH(f0);
+				DEBUGF("%f\n", f0);
+			break;
+			case I_OP_FTOI:
+				DEBUGF("OP_FTOI\n");
+				i0 = (int_t)stack_to_float(POP());
+				PUSH(i0);
+				DEBUGF("%d\n", i0);
+			break;
+			case I_OP_GLOAD:
+				
+			break;
+			case I_OP_GSTORE:
+				
+			break;
+			case I_OP_LOAD0:
+				DEBUGF("OP_LOAD0\n");
+				PUSH(0);
+			break;
+			case I_OP_ILOAD1:
+				DEBUGF("OP_ILOAD1\n");
+				PUSH(1);
+			break;
+			// Выделение памяти
+			case I_OP_ALLOC:
+				DEBUGF("OP_ALLOC\n");
+				tmp1 = POP(); // размер берётся из стека
+				tmp2 = heap->alloc(tmp1);
+				//*(uint8_t*)(heap->get_addr(tmp2)) = 0; // сохранить тип в первый байт
+				DEBUGF("id = %u, size = %u\n", tmp2, tmp1);
+				PUSH(tmp2); // ид переносится в стек
+			break;
+			// Изменение величины блока
+			case I_OP_REALLOC:
+				DEBUGF("OP_REALLOC\n");
+				tmp1 = POP(); // размер из стека
+				tmp2 = POP(); // ид из стека
+				tmp2 = heap->alloc(tmp1);
+				DEBUGF("id = %u, size = %u\n", tmp2, tmp1);
+				heap->realloc(tmp1, tmp2);
+			break;
+			case I_OP_FREE:
+				DEBUGF("OP_FREE\n");
+				tmp1 = POP(); // ид из стека
+				heap->free(tmp1);
+			break;
+			case I_OP_IALOAD: // загрузка 32-битного числа
+				DEBUGF("OP_IALOAD\n");
+				tmp1 = POP(); // ид из стека
+				tmp2 = POP(); // индекс из стека
+				DEBUGF("id = %u, index = %u\n", tmp1, tmp2);
+				if (((tmp2 + 1) * 4) > heap->get_length(tmp1)) {
+					VM_ERR(VM_ERR_INDEX_OUT_OF_RANGE); /*Индекс за пределами*/
+				}
+				PUSH(*((int_t*)heap->get_addr(tmp1) + tmp2));
+			break;
+			case I_OP_IASTORE: // запись 32-битного числа
+				DEBUGF("OP_IASTORE\n");
+				tmp1 = POP(); // ид из стека
+				tmp2 = POP(); // индекс из стека
+				i0 = uint_to_int32(POP()); // результат выражения из стека
+				DEBUGF("id = %u, index = %u, value = %d\n", tmp1, tmp2, i0);
+				if (((tmp2 + 1) * 4) > heap->get_length(tmp1)) {
+					VM_ERR(VM_ERR_INDEX_OUT_OF_RANGE); /*Индекс за пределами*/
+				}
+				*((int_t*)heap->get_addr(tmp1) + tmp2) = i0;
+			break;
+			case I_OP_BALOAD: // загрузка 8-битного числа
+				DEBUGF("OP_BALOAD\n");
+				tmp1 = POP(); // ид из стека
+				tmp2 = POP(); // индекс из стека
+				if (tmp2 + 1 > heap->get_length(tmp1)) {
+					VM_ERR(VM_ERR_INDEX_OUT_OF_RANGE); /*Индекс за пределами*/
+				}
+				PUSH(((uint8_t*)heap->get_addr(tmp1))[tmp2]);
+			break;
+			case I_OP_BASTORE: // запись 8-битного числа
+				DEBUGF("OP_BASTORE\n");
+				tmp1 = POP(); // ид из стека
+				tmp2 = POP(); // индекс из стека
+				i0 = uint_to_int32(POP()); // результат выражения из стека
+				if (tmp2 + 1 > heap->get_length(tmp1)) {
+					VM_ERR(VM_ERR_INDEX_OUT_OF_RANGE); /*Индекс за пределами*/
+				}
+				((uint8_t*)heap->get_addr(tmp1))[tmp2] = i0;
+			break;
+			default:
+				throw VM_ERR_UNKNOWN_INSTR;
 			break;
 		}
-	} while (
-		1
-	);
-	DBG("End");
+	} while (1);
+vm_end:
+	DEBUGF("End");
+	return VM_NOERROR;
 }
 
+void VM::StackPush(stack_t val) {
+	*++this->_sp = val;
+}
 
+stack_t VM::StackPop() {
+	return *this->_sp--;
+}
+
+void VM::CleanMemory() {
+	heap->delete_heap();
+}
 
 
