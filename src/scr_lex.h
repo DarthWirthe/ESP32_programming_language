@@ -5,7 +5,6 @@
 #ifndef SCR_LEX_H
 #define SCR_LEX_H
 
-//#include "utils/scr_dbg.h"
 #include <string>
 #include <stdint.h>
 #include "scr_tref.h"
@@ -14,9 +13,7 @@
 #define LEX_INPUT_STRING 0
 #define LEX_INPUT_FILE 1
 
-#define RESERVED_NUM 10
-
-#define C_BUFFER_LEN 80
+#define RESERVED_NUM 12
 
 typedef union {
 	int i;
@@ -38,6 +35,9 @@ class Token
 			Return,
 			And,
 			Or,
+			Const,
+			Global,
+//###
 			LeftParen,
 			RightParen,
 			LeftSquare,
@@ -51,12 +51,17 @@ class Token
 			NotEqual,
 			Greater,
 			GreaterOrEqual,
+			DoubleLess,
+			DoubleGreater,
 			Plus,
 			Minus,
 			Asterisk,
 			Slash,
 			Modulo,
 			Not,
+			Tilde,
+			Ampersand,
+			Pipe,
 			Dot,
 			Comma,
 			Colon,
@@ -65,16 +70,17 @@ class Token
 			DoubleQuote,
 			Int,
 			Float,
+			String,
 			Identifier,
 			NewLine,
-			End,
+			EndOfFile,
 			Unexpected,
 			
 			UndefToken
 		};
 		Token(void);
-		Token(Type _type); // только тип
-		Token(Type _type, int _value); // тип и значение
+		Token(Type _type);
+		Token(Type _type, int _value);
 		Token(Type _type, char* _value);
 		Type type;
 		token_value value;
@@ -87,17 +93,22 @@ class Lexer
 	public:
 		Lexer(void);
 		Lexer(int input_type, std::string s);
-
-		char Peek(void); // возвращает последний символ
-		char Get(void); // переход к следующему символу
-		char PeekNext(void); // возвращает следующий символ
+		int FindReserved(void);
+		Token ReservedToken(void);
+		char Peek(void);
+		char Get(void);
+		char PeekNext(void);
 		Token Next(void);
 		void Pointer(char *p);
+		void ClearBuffer(void);
+		bool EndOfFile(char c);
+		void End(void);
 		//###
 		Token last_token;
 		int line = 1;
 		int column = 1;
 	private:
+		std::string T_BUF;
 		int InputType;
 		char *pointer;
 		char *input_base;
