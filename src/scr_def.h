@@ -17,12 +17,13 @@ class LangState {
 		void Compile(int input_type, std::string s);
 		void LoadString(std::string s);
 		void LoadFile(std::string s);
-		uint8_t Run(void);
+		int Run(void);
 	private:
 		Parser *parser_obj;
 		VM *vm;
 		uint8_t *code_base;
 		num_t *consts;
+		unsigned int heap_size;
 };
 
 
